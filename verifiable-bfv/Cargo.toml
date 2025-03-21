@@ -1,0 +1,16 @@
+[package]
+name = "verifiable-bfv"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# vbfv
+plonky2 = { version = "1.0.2" }
+anyhow = { version = "1.0" }
+itertools = "0.12.1"
+
+# bfv
+probability = "0.17.0"
+rand = "0.6.5"
