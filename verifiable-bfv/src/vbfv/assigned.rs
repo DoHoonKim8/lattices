@@ -110,15 +110,16 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
 
     /// Converts polynomial in coefficients form into NTT form and then assign
     fn assign(&self, pw: &mut PartialWitness<F>, poly_coeffs: &Vec<i64>) -> Result<(), Error> {
-        println!("{:?}", poly_coeffs);
-        let evals = ntt_forward(
+        let evals = ntt_forward::<F, D, Q>(
             &poly_coeffs
                 .iter()
                 .map(|coeff| F::from_canonical_i64(*coeff))
                 .collect_vec(),
         );
-        let evals = evals.iter().map(|eval| F::from_canonical_u64(eval.to_canonical_u64() % Q)).collect_vec();
-        println!("{:?}", evals);
+        let evals = evals
+            .iter()
+            .map(|eval| F::from_canonical_u64(eval.to_canonical_u64() % Q))
+            .collect_vec();
         self.evals
             .iter()
             .zip(evals)

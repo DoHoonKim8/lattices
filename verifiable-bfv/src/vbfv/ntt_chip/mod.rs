@@ -7,6 +7,11 @@ use plonky2::hash::hash_types::RichField;
 use plonky2::iop::target::Target;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 
+#[derive(Debug)]
+struct NTTOpsGenerator<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
+
+}
+
 pub(crate) struct NTTChip<F: RichField + Extendable<D>, const D: usize> {
     _marker: PhantomData<F>,
 }
