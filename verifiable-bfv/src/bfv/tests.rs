@@ -35,6 +35,7 @@ mod tests {
         q: i64,
         std_dev: f64,
     ) {
+        let q = 3329;
         let degree = msg_1.len();
         let mut rng = rand::rngs::StdRng::seed_from_u64(19);
 

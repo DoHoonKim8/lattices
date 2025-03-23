@@ -10,27 +10,62 @@ use plonky2::{
         witness::{PartialWitness, WitnessWrite},
     },
     plonk::circuit_builder::CircuitBuilder,
-    util::log2_strict,
+    util::{log2_ceil, log2_strict},
 };
 
 use super::ntt_chip::NTTChip;
 use crate::{bfv::Ciphertext, vbfv::ntt_forward};
 
-/// `AssignedPoly` is assigned value of polynomial inside `R_Q = \mathbb{Z}_Q[X]/(X^N+1)`
-/// where `X^N+1` is `2N`-th cyclotomic polynomial(N is power-of-two).
-struct AssignedPoly<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usize> {
+/// `AssignedValue` is assigned value of mod `Q` element
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct AssignedValue<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
     _marker: PhantomData<F>,
-    coeffs: [Target; N],
+    pub value: Target,
 }
 
-impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usize>
+impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> AssignedValue<F, D, Q> {
+    pub fn new(cb: &mut CircuitBuilder<F, D>) -> Self {
+        let value = cb.add_virtual_target();
+        cb.range_check(value, log2_ceil(Q as usize));
+        Self {
+            _marker: PhantomData,
+            value,
+        }
+    }
+
+    pub fn new_from_target(cb: &mut CircuitBuilder<F, D>, target: Target) -> Self {
+        cb.range_check(target, log2_ceil(Q as usize));
+        Self {
+            _marker: PhantomData,
+            value: target,
+        }
+    }
+
+    pub fn assign(&self, pw: &mut PartialWitness<F>, value: F) -> Result<(), Error> {
+        pw.set_target(self.value, value)
+    }
+}
+
+/// `AssignedPoly` is assigned value of polynomial inside `R_Q = \mathbb{Z}_Q[X]/(X^N+1)`
+/// where `X^N+1` is `2N`-th cyclotomic polynomial(N is power-of-two).
+#[derive(Copy, Clone, Debug)]
+struct AssignedPoly<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
+    _marker: PhantomData<F>,
+    coeffs: [AssignedValue<F, D, Q>; N],
+}
+
+impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     AssignedPoly<F, D, N, Q>
 {
     fn new(cb: &mut CircuitBuilder<F, D>) -> Result<Self, Error> {
         Ok(AssignedPoly {
             _marker: PhantomData,
-            coeffs: cb.add_virtual_targets(N).try_into().unwrap(),
+            coeffs: [(); N].map(|_| AssignedValue::new(cb)),
         })
+    }
+
+    fn coeff_targets(&self) -> Vec<Target> {
+        self.coeffs.iter().map(|coeff| coeff.value).collect_vec()
     }
 
     fn assign(&self, pw: &mut PartialWitness<F>, coeffs: &Vec<i64>) -> Result<(), Error> {
@@ -39,7 +74,7 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usiz
         self.coeffs
             .iter()
             .zip(coeffs)
-            .map(|(tcoeff, coeff)| pw.set_target(*tcoeff, F::from_canonical_i64(*coeff)))
+            .map(|(tcoeff, coeff)| tcoeff.assign(pw, F::from_canonical_i64(*coeff)))
             .collect::<Result<Vec<()>, Error>>()?;
         Ok(())
     }
@@ -50,84 +85,103 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usiz
 /// In bfv, we will assume that `Q-1` is divisible by `2N`, which means that `X^N+1` is fully
 /// splitting in `\mathbb{Z}_Q`.
 /// `AssignedNTTPoly` should be created from `AssignedPoly`.
-struct AssignedNTTPoly<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usize>
-{
+#[derive(Copy, Clone, Debug)]
+struct AssignedNTTPoly<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
     _marker: PhantomData<F>,
-    evals: [Target; N],
+    evals: [AssignedValue<F, D, Q>; N],
 }
 
-impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usize>
+impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     AssignedNTTPoly<F, D, N, Q>
 {
-    fn new(
-        cb: &mut CircuitBuilder<F, D>,
-        assigned_poly: &AssignedPoly<F, D, N, Q>,
-    ) -> Result<Self, Error> {
-        Ok(AssignedNTTPoly {
+    fn new(cb: &mut CircuitBuilder<F, D>) -> Self {
+        Self {
             _marker: PhantomData,
-            evals: NTTChip::ntt_forward(cb, &assigned_poly.coeffs.to_vec())
-                .try_into()
-                .unwrap(),
-        })
+            evals: [(); N].map(|_| AssignedValue::new(cb)),
+        }
+    }
+
+    fn new_from_targets(cb: &mut CircuitBuilder<F, D>, evals: [Target; N]) -> Self {
+        Self {
+            _marker: PhantomData,
+            evals: evals.map(|eval| AssignedValue::new_from_target(cb, eval)),
+        }
     }
 
     /// Converts polynomial in coefficients form into NTT form and then assign
     fn assign(&self, pw: &mut PartialWitness<F>, poly_coeffs: &Vec<i64>) -> Result<(), Error> {
+        println!("{:?}", poly_coeffs);
         let evals = ntt_forward(
             &poly_coeffs
                 .iter()
                 .map(|coeff| F::from_canonical_i64(*coeff))
                 .collect_vec(),
         );
+        let evals = evals.iter().map(|eval| F::from_canonical_u64(eval.to_canonical_u64() % Q)).collect_vec();
+        println!("{:?}", evals);
         self.evals
             .iter()
             .zip(evals)
-            .map(|(teval, eval)| pw.set_target(*teval, eval))
+            .map(|(teval, eval)| teval.assign(pw, eval))
             .collect::<Result<Vec<()>, Error>>()?;
         Ok(())
-    }
-
-    fn add(&self, cb: &mut CircuitBuilder<F, D>, other: Self) -> Result<Self, Error> {
-        todo!()
-    }
-
-    fn mul(&self, cb: &mut CircuitBuilder<F, D>, other: Self) -> Result<Self, Error> {
-        todo!()
     }
 }
 
 /// `AssignedCiphertext` is assigned value of bfv ciphertext consisting of two `R_Q` polynomials.
-/// `ciphertext` --- NTT ---> `ntt_ciphertext`
+#[derive(Copy, Clone, Debug)]
 pub struct AssignedCiphertext<
     F: RichField + Extendable<D>,
     const D: usize,
     const N: usize,
-    const Q: usize,
+    const Q: u64,
 > {
-    ciphertext: [AssignedPoly<F, D, N, Q>; 2],
-    ntt_ciphertext: [AssignedNTTPoly<F, D, N, Q>; 2],
+    ciphertext: [AssignedNTTPoly<F, D, N, Q>; 2],
 }
 
-impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: usize>
+impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     AssignedCiphertext<F, D, N, Q>
 {
-    fn new(cb: &mut CircuitBuilder<F, D>) -> Result<Self, Error> {
-        let ct_0 = AssignedPoly::new(cb)?;
-        let ct_1 = AssignedPoly::new(cb)?;
-        let ntt_ct_0 = AssignedNTTPoly::new(cb, &ct_0)?;
-        let ntt_ct_1 = AssignedNTTPoly::new(cb, &ct_1)?;
-        Ok(AssignedCiphertext {
+    pub fn new(cb: &mut CircuitBuilder<F, D>) -> Self {
+        let ct_0 = AssignedNTTPoly::new(cb);
+        let ct_1 = AssignedNTTPoly::new(cb);
+        AssignedCiphertext {
             ciphertext: [ct_0, ct_1],
-            ntt_ciphertext: [ntt_ct_0, ntt_ct_1],
-        })
+        }
     }
 
-    fn assign(&self, pw: &mut PartialWitness<F>, ct: Ciphertext) -> Result<(), Error> {
-        // Assigns ciphertext into 2 * `AssignedPoly`
+    pub fn new_from_targets(
+        cb: &mut CircuitBuilder<F, D>,
+        ct_0_targets: [Target; N],
+        ct_1_targets: [Target; N],
+    ) -> Self {
+        Self {
+            ciphertext: [
+                AssignedNTTPoly::new_from_targets(cb, ct_0_targets),
+                AssignedNTTPoly::new_from_targets(cb, ct_1_targets),
+            ],
+        }
+    }
+
+    pub fn register_as_public_input(&self, cb: &mut CircuitBuilder<F, D>) {
+        self.ciphertext[0].evals.iter().for_each(|eval| {
+            cb.register_public_input(eval.value);
+        });
+        self.ciphertext[1].evals.iter().for_each(|eval| {
+            cb.register_public_input(eval.value);
+        });
+    }
+
+    pub(crate) fn ciphertext_targets(&self) -> Vec<Target> {
+        self.ciphertext
+            .iter()
+            .flat_map(|ct| ct.evals.iter().map(|eval| eval.value).collect_vec())
+            .collect_vec()
+    }
+
+    pub fn assign(&self, pw: &mut PartialWitness<F>, ct: Ciphertext) -> Result<(), Error> {
         self.ciphertext[0].assign(pw, ct.c_0.val())?;
         self.ciphertext[1].assign(pw, ct.c_1.val())?;
-        self.ntt_ciphertext[0].assign(pw, ct.c_0.val())?;
-        self.ntt_ciphertext[1].assign(pw, ct.c_1.val())?;
         Ok(())
     }
 }

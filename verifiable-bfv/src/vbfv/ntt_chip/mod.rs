@@ -8,7 +8,7 @@ use plonky2::iop::target::Target;
 use plonky2::plonk::circuit_builder::CircuitBuilder;
 
 pub(crate) struct NTTChip<F: RichField + Extendable<D>, const D: usize> {
-    _maker: PhantomData<F>,
+    _marker: PhantomData<F>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize> NTTChip<F, D> {
