@@ -114,7 +114,7 @@ mod tests {
     #[test]
     fn test_ntt_forward() {
         const D: usize = 2;
-        const Q: u64 = 97;
+        const Q: u64 = 3329;
         type C = PoseidonGoldilocksConfig;
         type F = <C as GenericConfig<D>>::F;
         let N = params::N;
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_ntt_backward() {
         const D: usize = 2;
-        const Q: u64 = 97;
+        const Q: u64 = 3329;
         type C = PoseidonGoldilocksConfig;
         type F = <C as GenericConfig<D>>::F;
         let N = params::N;

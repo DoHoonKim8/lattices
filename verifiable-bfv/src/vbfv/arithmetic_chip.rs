@@ -17,7 +17,7 @@ use plonky2::{
 use super::assigned::AssignedValue;
 
 #[derive(Debug)]
-enum ArithmeticOps<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
+enum ArithmeticOpKind<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
     Add(AssignedValue<F, D, Q>, AssignedValue<F, D, Q>),
     Sub(AssignedValue<F, D, Q>, AssignedValue<F, D, Q>),
     Mul(AssignedValue<F, D, Q>, AssignedValue<F, D, Q>),
@@ -27,11 +27,11 @@ enum ArithmeticOps<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
 #[derive(Debug)]
 struct ArithmeticOpsGenerator<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
     quotient: AssignedValue<F, D, Q>,
-    op_kind: ArithmeticOps<F, D, Q>,
+    op_kind: ArithmeticOpKind<F, D, Q>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticOpsGenerator<F, D, Q> {
-    fn new(quotient: AssignedValue<F, D, Q>, op_kind: ArithmeticOps<F, D, Q>) -> Self {
+    fn new(quotient: AssignedValue<F, D, Q>, op_kind: ArithmeticOpKind<F, D, Q>) -> Self {
         Self { quotient, op_kind }
     }
 }
@@ -45,10 +45,10 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> SimpleGenerator
 
     fn dependencies(&self) -> Vec<Target> {
         let dependencies = match self.op_kind {
-            ArithmeticOps::Add(x, y) | ArithmeticOps::Sub(x, y) | ArithmeticOps::Mul(x, y) => {
+            ArithmeticOpKind::Add(x, y) | ArithmeticOpKind::Sub(x, y) | ArithmeticOpKind::Mul(x, y) => {
                 [x.value, y.value].to_vec()
             }
-            ArithmeticOps::MulConst(_, x) => vec![x.value],
+            ArithmeticOpKind::MulConst(_, x) => vec![x.value],
         };
         dependencies
     }
@@ -59,22 +59,22 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> SimpleGenerator
         out_buffer: &mut GeneratedValues<F>,
     ) -> Result<()> {
         let tmp = match self.op_kind {
-            ArithmeticOps::Add(x, y) => {
+            ArithmeticOpKind::Add(x, y) => {
                 let x = witness.get_target(x.value);
                 let y = witness.get_target(y.value);
-                (x.to_canonical_u64() + y.to_canonical_u64()) as u128
+                (x.to_canonical_u64() as u128) + (y.to_canonical_u64() as u128)
             }
-            ArithmeticOps::Sub(x, y) => {
+            ArithmeticOpKind::Sub(x, y) => {
                 let x = witness.get_target(x.value);
                 let y = witness.get_target(y.value);
-                (x.to_canonical_u64() + Q - y.to_canonical_u64()) as u128
+                (x.to_canonical_u64() as u128) + (Q as u128) - (y.to_canonical_u64() as u128)
             }
-            ArithmeticOps::Mul(x, y) => {
+            ArithmeticOpKind::Mul(x, y) => {
                 let x = witness.get_target(x.value);
                 let y = witness.get_target(y.value);
                 (x.to_canonical_u64() as u128) * (y.to_canonical_u64() as u128)
             }
-            ArithmeticOps::MulConst(constant, x) => {
+            ArithmeticOpKind::MulConst(constant, x) => {
                 let x = witness.get_target(x.value);
                 (constant.to_canonical_u64() as u128) * (x.to_canonical_u64() as u128)
             }
@@ -119,7 +119,7 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticChip<
         y: AssignedValue<F, D, Q>,
     ) -> Result<AssignedValue<F, D, Q>, Error> {
         let quotient = AssignedValue::new(cb);
-        let op_kind = ArithmeticOps::Add(x, y);
+        let op_kind = ArithmeticOpKind::Add(x, y);
         let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
         cb.add_simple_generator(arithmetic_ops_generator);
 
@@ -138,7 +138,7 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticChip<
         y: AssignedValue<F, D, Q>,
     ) -> Result<AssignedValue<F, D, Q>, Error> {
         let quotient = AssignedValue::new(cb);
-        let op_kind = ArithmeticOps::Sub(x, y);
+        let op_kind = ArithmeticOpKind::Sub(x, y);
         let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
         cb.add_simple_generator(arithmetic_ops_generator);
 
@@ -158,7 +158,7 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticChip<
         constant: F,
     ) -> Result<AssignedValue<F, D, Q>, Error> {
         let quotient = AssignedValue::new(cb);
-        let op_kind = ArithmeticOps::MulConst(constant, multiplicand);
+        let op_kind = ArithmeticOpKind::MulConst(constant, multiplicand);
         let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
         cb.add_simple_generator(arithmetic_ops_generator);
 

@@ -111,6 +111,13 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
         }
     }
 
+    fn new_from_values(values: [AssignedValue<F, D, Q>; N]) -> Self {
+        Self {
+            _marker: PhantomData,
+            evals: values,
+        }
+    }
+
     /// Converts polynomial in coefficients form into NTT form and then assign
     fn assign(&self, pw: &mut PartialWitness<F>, poly_coeffs: &Vec<i64>) -> Result<(), Error> {
         let evals = ntt_forward::<F, D, Q>(
@@ -121,7 +128,7 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
         );
         let evals = evals
             .iter()
-            .map(|eval| F::from_canonical_u64(eval.to_canonical_u64() % Q))
+            .map(|eval| F::from_canonical_u64(eval.to_canonical_u64()))
             .collect_vec();
         self.evals
             .iter()
@@ -167,6 +174,18 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
         }
     }
 
+    pub fn new_from_values(
+        ct_0_values: [AssignedValue<F, D, Q>; N],
+        ct_1_values: [AssignedValue<F, D, Q>; N],
+    ) -> Self {
+        Self {
+            ciphertext: [
+                AssignedNTTPoly::new_from_values(ct_0_values),
+                AssignedNTTPoly::new_from_values(ct_1_values),
+            ],
+        }
+    }
+
     pub fn register_as_public_input(&self, cb: &mut CircuitBuilder<F, D>) {
         self.ciphertext[0].evals.iter().for_each(|eval| {
             cb.register_public_input(eval.value);
@@ -174,6 +193,10 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
         self.ciphertext[1].evals.iter().for_each(|eval| {
             cb.register_public_input(eval.value);
         });
+    }
+
+    pub(crate) fn values(&self) -> Vec<AssignedValue<F, D, Q>> {
+        self.ciphertext.iter().flat_map(|ct| ct.evals).collect_vec()
     }
 
     pub(crate) fn ciphertext_targets(&self) -> Vec<Target> {

@@ -15,7 +15,7 @@ use plonky2::{
     util::serialization::{Buffer, IoResult, Read, Write},
 };
 
-use super::assigned::AssignedCiphertext;
+use super::{arithmetic_chip::ArithmeticChip, assigned::AssignedCiphertext};
 
 // TODO : AddConst, Mul, MulConst
 #[derive(Debug)]
@@ -94,12 +94,18 @@ impl<F: PrimeField64 + RichField + Extendable<D>, const D: usize, const N: usize
 
 /// `CiphertextChip` is contraint builder for arithmetic operations between bfv ciphertexts
 struct CiphertextChip<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
-    _marker: PhantomData<F>,
+    arithmetic_chip: ArithmeticChip<F, D, Q>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     CiphertextChip<F, D, N, Q>
 {
+    pub fn new() -> Self {
+        Self {
+            arithmetic_chip: ArithmeticChip::new(),
+        }
+    }
+
     /// Assigns bfv ciphertexts and constrains the correct formulation of ciphertexts
     /// Expects input ciphertext is not in NTT form
     pub fn assign_ciphertexts(
@@ -110,11 +116,12 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     }
 
     pub fn add_ciphertexts(
+        &self,
         cb: &mut CircuitBuilder<F, D>,
         ct0: AssignedCiphertext<F, D, N, Q>,
         ct1: AssignedCiphertext<F, D, N, Q>,
     ) -> Result<AssignedCiphertext<F, D, N, Q>, Error> {
-        let mut ct_result_targets = vec![];
+        let mut ct_result_values = vec![];
         let quotient = (0..2 * N)
             .map(|_| AssignedValue::new(cb))
             .into_iter()
@@ -124,22 +131,15 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
         let neg_one = cb.neg_one();
         let ciphertext_ops_generator = CiphertextOpsGenerator::new(cb, ct0, ct1, quotient.clone());
         cb.add_simple_generator(ciphertext_ops_generator);
-        for (i, (ct0_target, ct1_target)) in ct0
-            .ciphertext_targets()
-            .iter()
-            .zip(ct1.ciphertext_targets().iter())
-            .enumerate()
+        for (i, (ct0_value, ct1_value)) in ct0.values().iter().zip(ct1.values().iter()).enumerate()
         {
-            let eval_added = cb.add(*ct0_target, *ct1_target);
-            let ct_result_eval =
-                cb.arithmetic(ring_modulus, one, neg_one, quotient[i].value, eval_added);
-            ct_result_targets.push(ct_result_eval);
+            let ct_added = self.arithmetic_chip.add(cb, *ct0_value, *ct1_value)?;
+            ct_result_values.push(ct_added);
         }
-        let (ct_result_0_targets, ct_result_1_targets) = ct_result_targets.split_at(N);
-        let ct_result = AssignedCiphertext::new_from_targets(
-            cb,
-            ct_result_0_targets.try_into().unwrap(),
-            ct_result_1_targets.try_into().unwrap(),
+        let (ct_result_0_values, ct_result_1_values) = ct_result_values.split_at(N);
+        let ct_result = AssignedCiphertext::new_from_values(
+            ct_result_0_values.try_into().unwrap(),
+            ct_result_1_values.try_into().unwrap(),
         );
         Ok(ct_result)
     }
@@ -174,7 +174,7 @@ mod tests {
     fn test_add_ciphertexts() -> Result<(), Error> {
         const D: usize = 2;
         const N: usize = 8;
-        const Q: u64 = 97;
+        const Q: u64 = 3329;
         type C = PoseidonGoldilocksConfig;
         type F = GoldilocksField;
         for t in vec![2, 4, 8, 16, 32].iter() {
@@ -202,11 +202,12 @@ mod tests {
             // constrain adding ciphertexts
             let config = CircuitConfig::standard_recursion_config();
             let mut builder = CircuitBuilder::<<C as GenericConfig<D>>::F, D>::new(config);
+            let ciphertext_chip = CiphertextChip::new();
 
             let assigned_ct1 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder);
             let assigned_ct2 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder);
             let assigned_ct_added =
-                CiphertextChip::add_ciphertexts(&mut builder, assigned_ct1, assigned_ct2)?;
+                ciphertext_chip.add_ciphertexts(&mut builder, assigned_ct1, assigned_ct2)?;
 
             assigned_ct_added.register_as_public_input(&mut builder);
 
@@ -226,7 +227,13 @@ mod tests {
                 .chain(add_ciphertext.c_1.val().to_owned().into_iter())
                 .map(|coeff| F::from_canonical_i64(coeff))
                 .collect_vec();
-            let expected = ntt_forward::<F, D, Q>(&add_ciphertext);
+            let (add_ciphertext_0, add_ciphertext_1) = add_ciphertext.split_at(N);
+            let expected_0 = ntt_forward::<F, D, Q>(add_ciphertext_0);
+            let expected_1 = ntt_forward::<F, D, Q>(add_ciphertext_1);
+            let expected = expected_0
+                .into_iter()
+                .chain(expected_1.into_iter())
+                .collect_vec();
             proof
                 .public_inputs
                 .iter()

@@ -28,9 +28,18 @@ fn ntt_fw_update<F: RichField + Extendable<D>, const D: usize, const Q: u64>(
         let s = F::from_canonical_u64(root);
         for j in j1..j2 {
             let u = a[j];
-            let v = F::from_canonical_u64((a[j + t] * s).to_canonical_u64() % Q);
-            a[j] = F::from_canonical_u64((u + v).to_canonical_u64() % Q);
-            a[j + t] = F::from_canonical_u64((u - v).to_canonical_u64() % Q);
+            let v = F::from_canonical_u64(
+                ((a[j + t].to_canonical_u64() as u128) * (s.to_canonical_u64() as u128))
+                    .rem_euclid(Q as u128) as u64,
+            );
+            a[j] = F::from_canonical_u64(
+                ((u.to_canonical_u64() as u128) + (v.to_canonical_u64() as u128))
+                    .rem_euclid(Q as u128) as u64,
+            );
+            a[j + t] = F::from_canonical_u64(
+                ((u.to_canonical_u64() as u128) + (Q as u128) - (v.to_canonical_u64() as u128))
+                    .rem_euclid(Q as u128) as u64,
+            );
         }
     }
     a
