@@ -12,9 +12,13 @@ use plonky2::{
 
 mod arithmetic_chip;
 mod assigned;
+mod ciphertext_chip;
 mod ntt_chip;
 
-fn ntt_fw_update<F: RichField + Extendable<D>, const D: usize, const Q: u64>(input: &[F], m: usize) -> Vec<F> {
+fn ntt_fw_update<F: RichField + Extendable<D>, const D: usize, const Q: u64>(
+    input: &[F],
+    m: usize,
+) -> Vec<F> {
     let mut a = input.to_vec();
     let t = params::N / (2 * m);
     for i in 0..m {
@@ -32,7 +36,9 @@ fn ntt_fw_update<F: RichField + Extendable<D>, const D: usize, const Q: u64>(inp
     a
 }
 
-pub fn ntt_forward<F: RichField + Extendable<D>, const D: usize, const Q: u64>(input: &[F]) -> Vec<F> {
+pub fn ntt_forward<F: RichField + Extendable<D>, const D: usize, const Q: u64>(
+    input: &[F],
+) -> Vec<F> {
     let mut current = input.to_vec();
     for m in (0..params::LOGN).map(|i| 2usize.pow(i)) {
         current = ntt_fw_update::<F, D, Q>(&current, m);

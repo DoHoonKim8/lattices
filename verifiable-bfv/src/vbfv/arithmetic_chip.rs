@@ -1,86 +1,94 @@
-use std::marker::PhantomData;
+use std::{iter::once, marker::PhantomData, ops::Add};
 
-use crate::{bfv::Ciphertext, vbfv::assigned::AssignedValue};
-use anyhow::{Error, Ok, Result};
-use itertools::Itertools;
+use anyhow::{Error, Result};
+use itertools::chain;
 use plonky2::{
-    field::{extension::Extendable, types::PrimeField64},
+    field::extension::Extendable,
     hash::hash_types::RichField,
     iop::{
         generator::{GeneratedValues, SimpleGenerator},
         target::{BoolTarget, Target},
-        witness::{PartialWitness, PartitionWitness, Witness, WitnessWrite},
+        witness::{PartitionWitness, Witness, WitnessWrite},
     },
     plonk::{circuit_builder::CircuitBuilder, circuit_data::CommonCircuitData},
-    util::serialization::{Buffer, IoResult, Read, Write},
+    util::serialization::{Buffer, IoResult, Write},
 };
 
-use super::assigned::AssignedCiphertext;
+use super::assigned::AssignedValue;
 
-// TODO : AddConst, Mul, MulConst
 #[derive(Debug)]
-struct ArithmeticOpsGenerator<
-    F: RichField + Extendable<D>,
-    const D: usize,
-    const N: usize,
-    const Q: u64,
-> {
-    ct0: AssignedCiphertext<F, D, N, Q>,
-    ct1: AssignedCiphertext<F, D, N, Q>,
-    quotient: Vec<AssignedValue<F, D, Q>>,
+enum ArithmeticOps<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
+    Add(AssignedValue<F, D, Q>, AssignedValue<F, D, Q>),
+    Sub(AssignedValue<F, D, Q>, AssignedValue<F, D, Q>),
+    Mul(AssignedValue<F, D, Q>, AssignedValue<F, D, Q>),
+    MulConst(F, AssignedValue<F, D, Q>),
 }
 
-impl<F: PrimeField64 + RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
-    ArithmeticOpsGenerator<F, D, N, Q>
-{
-    fn new(
-        cb: &mut CircuitBuilder<F, D>,
-        ct0: AssignedCiphertext<F, D, N, Q>,
-        ct1: AssignedCiphertext<F, D, N, Q>,
-        quotient: Vec<AssignedValue<F, D, Q>>,
-    ) -> Self {
-        Self { ct0, ct1, quotient }
+#[derive(Debug)]
+struct ArithmeticOpsGenerator<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
+    quotient: AssignedValue<F, D, Q>,
+    op_kind: ArithmeticOps<F, D, Q>,
+}
+
+impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticOpsGenerator<F, D, Q> {
+    fn new(quotient: AssignedValue<F, D, Q>, op_kind: ArithmeticOps<F, D, Q>) -> Self {
+        Self { quotient, op_kind }
     }
 }
 
-impl<F: PrimeField64 + RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
-    SimpleGenerator<F, D> for ArithmeticOpsGenerator<F, D, N, Q>
+impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> SimpleGenerator<F, D>
+    for ArithmeticOpsGenerator<F, D, Q>
 {
     fn id(&self) -> String {
         "ArithmeticOpsGenerator".to_string()
     }
 
     fn dependencies(&self) -> Vec<Target> {
-        let mut targets = self.ct0.ciphertext_targets();
-        targets.extend_from_slice(self.ct1.ciphertext_targets().as_ref());
-        targets
+        let dependencies = match self.op_kind {
+            ArithmeticOps::Add(x, y) | ArithmeticOps::Sub(x, y) | ArithmeticOps::Mul(x, y) => {
+                [x.value, y.value].to_vec()
+            }
+            ArithmeticOps::MulConst(_, x) => vec![x.value],
+        };
+        dependencies
     }
 
     fn run_once(
         &self,
         witness: &PartitionWitness<F>,
         out_buffer: &mut GeneratedValues<F>,
-    ) -> Result<(), Error> {
-        let dependencies = self.dependencies();
-        let (ct0_targets, ct1_targets) = dependencies.split_at(dependencies.len() / 2);
-        for (i, (ct0_target, ct1_target)) in ct0_targets.iter().zip(ct1_targets).enumerate() {
-            let ct0_eval = witness.get_target(*ct0_target);
-            let ct1_eval = witness.get_target(*ct1_target);
-            let tmp = ct0_eval.to_canonical_u64() + ct1_eval.to_canonical_u64();
-            let quotient = tmp.div_euclid(Q);
-            out_buffer.set_target(self.quotient[i].value, F::from_canonical_u64(quotient));
-        }
-        Ok(())
+    ) -> Result<()> {
+        let tmp = match self.op_kind {
+            ArithmeticOps::Add(x, y) => {
+                let x = witness.get_target(x.value);
+                let y = witness.get_target(y.value);
+                (x.to_canonical_u64() + y.to_canonical_u64()) as u128
+            }
+            ArithmeticOps::Sub(x, y) => {
+                let x = witness.get_target(x.value);
+                let y = witness.get_target(y.value);
+                (x.to_canonical_u64() + Q - y.to_canonical_u64()) as u128
+            }
+            ArithmeticOps::Mul(x, y) => {
+                let x = witness.get_target(x.value);
+                let y = witness.get_target(y.value);
+                (x.to_canonical_u64() as u128) * (y.to_canonical_u64() as u128)
+            }
+            ArithmeticOps::MulConst(constant, x) => {
+                let x = witness.get_target(x.value);
+                (constant.to_canonical_u64() as u128) * (x.to_canonical_u64() as u128)
+            }
+        };
+        let quotient = tmp.div_euclid(Q as u128) as u64;
+        out_buffer.set_target(self.quotient.value, F::from_canonical_u64(quotient))
     }
 
-    fn serialize(&self, dst: &mut Vec<u8>, _common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
-        self.dependencies()
-            .iter()
-            .map(|target| dst.write_target(*target))
-            .collect::<IoResult<Vec<_>>>()?;
-        self.quotient
-            .iter()
-            .map(|q| dst.write_target(q.value))
+    fn serialize(&self, dst: &mut Vec<u8>, common_data: &CommonCircuitData<F, D>) -> IoResult<()> {
+        let dependencies = self.dependencies();
+        dependencies
+            .into_iter()
+            .chain(once(self.quotient.value))
+            .map(|target| dst.write_target(target))
             .collect::<IoResult<()>>()
     }
 
@@ -92,151 +100,73 @@ impl<F: PrimeField64 + RichField + Extendable<D>, const D: usize, const N: usize
     }
 }
 
-/// `ArithmeticChip` is contraint builder for arithmetic operations between bfv ciphertexts
-struct ArithmeticChip<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
+/// `ArithmeticChip` is constraint builder for arithmetic operations between `\mathbb{Z}_Q` elements
+pub(crate) struct ArithmeticChip<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
     _marker: PhantomData<F>,
 }
 
-impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
-    ArithmeticChip<F, D, N, Q>
-{
-    /// Assigns bfv ciphertexts and constrains the correct formulation of ciphertexts
-    /// Expects input ciphertext is not in NTT form
-    pub fn assign_ciphertexts(
-        pw: &mut PartialWitness<F>,
-        ct: &Vec<Ciphertext>,
-    ) -> Result<Vec<AssignedCiphertext<F, D, N, Q>>, Error> {
-        todo!()
+impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticChip<F, D, Q> {
+    pub(crate) fn new() -> Self {
+        Self {
+            _marker: PhantomData,
+        }
     }
 
-    pub fn add_ciphertexts(
+    pub(crate) fn add(
+        &self,
         cb: &mut CircuitBuilder<F, D>,
-        ct0: AssignedCiphertext<F, D, N, Q>,
-        ct1: AssignedCiphertext<F, D, N, Q>,
-    ) -> Result<AssignedCiphertext<F, D, N, Q>, Error> {
-        let mut ct_result_targets = vec![];
-        let quotient = (0..2 * N)
-            .map(|_| AssignedValue::new(cb))
-            .into_iter()
-            .collect_vec();
+        x: AssignedValue<F, D, Q>,
+        y: AssignedValue<F, D, Q>,
+    ) -> Result<AssignedValue<F, D, Q>, Error> {
+        let quotient = AssignedValue::new(cb);
+        let op_kind = ArithmeticOps::Add(x, y);
+        let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
+        cb.add_simple_generator(arithmetic_ops_generator);
+
         let ring_modulus = F::from_canonical_u64(Q);
         let one = F::ONE;
         let neg_one = cb.neg_one();
-        let arithmetic_ops_generator = ArithmeticOpsGenerator::new(cb, ct0, ct1, quotient.clone());
-        cb.add_simple_generator(arithmetic_ops_generator);
-        for (i, (ct0_target, ct1_target)) in ct0
-            .ciphertext_targets()
-            .iter()
-            .zip(ct1.ciphertext_targets().iter())
-            .enumerate()
-        {
-            let eval_added = cb.add(*ct0_target, *ct1_target);
-            let ct_result_eval =
-                cb.arithmetic(ring_modulus, one, neg_one, quotient[i].value, eval_added);
-            ct_result_targets.push(ct_result_eval);
-        }
-        let (ct_result_0_targets, ct_result_1_targets) = ct_result_targets.split_at(N);
-        let ct_result = AssignedCiphertext::new_from_targets(
-            cb,
-            ct_result_0_targets.try_into().unwrap(),
-            ct_result_1_targets.try_into().unwrap(),
-        );
-        Ok(ct_result)
+        let tmp = cb.add(x.value, y.value);
+        let result = cb.arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
+        Ok(AssignedValue::new_from_target(cb, result))
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use anyhow::{Error, Ok, Result};
-    use itertools::Itertools;
-    use plonky2::{
-        field::{
-            extension::Extendable,
-            goldilocks_field::GoldilocksField,
-            types::{Field, Field64, PrimeField64},
-        },
-        hash::hash_types::RichField,
-        iop::witness::PartialWitness,
-        plonk::{
-            circuit_builder::CircuitBuilder,
-            circuit_data::CircuitConfig,
-            config::{GenericConfig, PoseidonGoldilocksConfig},
-        },
-    };
-    use rand::SeedableRng;
+    pub(crate) fn sub(
+        &self,
+        cb: &mut CircuitBuilder<F, D>,
+        x: AssignedValue<F, D, Q>,
+        y: AssignedValue<F, D, Q>,
+    ) -> Result<AssignedValue<F, D, Q>, Error> {
+        let quotient = AssignedValue::new(cb);
+        let op_kind = ArithmeticOps::Sub(x, y);
+        let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
+        cb.add_simple_generator(arithmetic_ops_generator);
 
-    use crate::{
-        bfv::{Plaintext, SecretKey},
-        vbfv::{arithmetic_chip::ArithmeticChip, assigned::AssignedCiphertext, ntt_forward},
-    };
+        let ring_modulus = F::from_canonical_u64(Q);
+        let one = F::ONE;
+        let neg_one = cb.neg_one();
+        let mut tmp = cb.add_const(x.value, ring_modulus);
+        tmp = cb.sub(tmp, y.value);
+        let result = cb.arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
+        Ok(AssignedValue::new_from_target(cb, result))
+    }
 
-    #[test]
-    fn test_add_ciphertexts() -> Result<(), Error> {
-        const D: usize = 2;
-        const N: usize = 8;
-        const Q: u64 = 97;
-        type C = PoseidonGoldilocksConfig;
-        type F = GoldilocksField;
-        for t in vec![2, 4, 8, 16, 32].iter() {
-            let msg_1 = vec![0, 1, 2, 3, 4, 5, 6, 7];
-            let msg_2 = vec![7, 6, 5, 4, 3, 2, 1, 0];
-            let std_dev = 3.2;
-            // Prepare ciphertexts
-            let mut rng = rand::rngs::StdRng::seed_from_u64(19);
+    pub(crate) fn mul_with_constant(
+        &self,
+        cb: &mut CircuitBuilder<F, D>,
+        multiplicand: AssignedValue<F, D, Q>,
+        constant: F,
+    ) -> Result<AssignedValue<F, D, Q>, Error> {
+        let quotient = AssignedValue::new(cb);
+        let op_kind = ArithmeticOps::MulConst(constant, multiplicand);
+        let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
+        cb.add_simple_generator(arithmetic_ops_generator);
 
-            let secret_key = SecretKey::generate(N, &mut rng);
-            let public_key = secret_key.public_key_gen(Q as i64, std_dev, &mut rng);
-
-            let plaintext1 = Plaintext::new(msg_1, *t);
-            let ciphertext1 = plaintext1.encrypt(&public_key, std_dev, &mut rng);
-            let decrypted1 = ciphertext1.decrypt(&secret_key);
-            assert_eq!(decrypted1.poly(), plaintext1.poly() % (*t, N));
-
-            let plaintext2 = Plaintext::new(msg_2, *t);
-            let ciphertext2 = plaintext2.encrypt(&public_key, std_dev, &mut rng);
-            let decrypted2 = ciphertext2.decrypt(&secret_key);
-            assert_eq!(decrypted2.poly(), plaintext2.poly() % (*t, N));
-
-            let add_ciphertext = ciphertext1.clone() + ciphertext2.clone();
-
-            // constrain adding ciphertexts
-            let config = CircuitConfig::standard_recursion_config();
-            let mut builder = CircuitBuilder::<<C as GenericConfig<D>>::F, D>::new(config);
-
-            let assigned_ct1 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder);
-            let assigned_ct2 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder);
-            let assigned_ct_added =
-                ArithmeticChip::add_ciphertexts(&mut builder, assigned_ct1, assigned_ct2)?;
-
-            assigned_ct_added.register_as_public_input(&mut builder);
-
-            // assign witnesses
-            let mut pw = PartialWitness::new();
-            assigned_ct1.assign(&mut pw, ciphertext1)?;
-            assigned_ct2.assign(&mut pw, ciphertext2)?;
-
-            let data = builder.build::<C>();
-            let proof = data.prove(pw)?;
-
-            let add_ciphertext = add_ciphertext
-                .c_0
-                .val()
-                .to_owned()
-                .into_iter()
-                .chain(add_ciphertext.c_1.val().to_owned().into_iter())
-                .map(|coeff| F::from_canonical_i64(coeff))
-                .collect_vec();
-            let expected = ntt_forward::<F, D, Q>(&add_ciphertext);
-            proof
-                .public_inputs
-                .iter()
-                .zip_eq(expected)
-                .for_each(|(actual, expected)| {
-                    assert_eq!(*actual, expected);
-                });
-
-            data.verify(proof)?;
-        }
-        Ok(())
+        let ring_modulus = F::from_canonical_u64(Q);
+        let one = F::ONE;
+        let neg_one = cb.neg_one();
+        let tmp = cb.mul_const(constant, multiplicand.value);
+        let result = cb.arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
+        Ok(AssignedValue::new_from_target(cb, result))
     }
 }

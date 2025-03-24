@@ -41,6 +41,10 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> AssignedValue<F
         }
     }
 
+    pub fn register_as_public_input(&self, cb: &mut CircuitBuilder<F, D>) {
+        cb.register_public_input(self.value);
+    }
+
     pub fn assign(&self, pw: &mut PartialWitness<F>, value: F) -> Result<(), Error> {
         pw.set_target(self.value, value)
     }
@@ -84,7 +88,6 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
 /// where `X^N+1` is `2N`-th cyclotomic polynomial(N is power-of-two).
 /// In bfv, we will assume that `Q-1` is divisible by `2N`, which means that `X^N+1` is fully
 /// splitting in `\mathbb{Z}_Q`.
-/// `AssignedNTTPoly` should be created from `AssignedPoly`.
 #[derive(Copy, Clone, Debug)]
 struct AssignedNTTPoly<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
     _marker: PhantomData<F>,
