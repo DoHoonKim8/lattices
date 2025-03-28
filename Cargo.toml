@@ -1,6 +1,6 @@
 [workspace]
 members = [
     "falcon",
-    "celpc",
+    "labrador-rs",
     "verifiable-bfv",
 ]

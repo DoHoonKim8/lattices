@@ -1,7 +1,7 @@
 use std::{iter::once, marker::PhantomData, ops::Add};
 
 use anyhow::{Error, Result};
-use itertools::chain;
+use itertools::{chain, Itertools};
 use plonky2::{
     field::extension::Extendable,
     hash::hash_types::RichField,
@@ -14,7 +14,7 @@ use plonky2::{
     util::serialization::{Buffer, IoResult, Write},
 };
 
-use super::assigned::AssignedValue;
+use super::assigned::{AssignedNTTPoly, AssignedValue};
 
 #[derive(Debug)]
 enum ArithmeticOpKind<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
@@ -45,9 +45,9 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> SimpleGenerator
 
     fn dependencies(&self) -> Vec<Target> {
         let dependencies = match self.op_kind {
-            ArithmeticOpKind::Add(x, y) | ArithmeticOpKind::Sub(x, y) | ArithmeticOpKind::Mul(x, y) => {
-                [x.value, y.value].to_vec()
-            }
+            ArithmeticOpKind::Add(x, y)
+            | ArithmeticOpKind::Sub(x, y)
+            | ArithmeticOpKind::Mul(x, y) => [x.value, y.value].to_vec(),
             ArithmeticOpKind::MulConst(_, x) => vec![x.value],
         };
         dependencies
@@ -102,71 +102,81 @@ impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> SimpleGenerator
 
 /// `ArithmeticChip` is constraint builder for arithmetic operations between `\mathbb{Z}_Q` elements
 pub(crate) struct ArithmeticChip<F: RichField + Extendable<D>, const D: usize, const Q: u64> {
-    _marker: PhantomData<F>,
+    pub cb: CircuitBuilder<F, D>,
 }
 
 impl<F: RichField + Extendable<D>, const D: usize, const Q: u64> ArithmeticChip<F, D, Q> {
-    pub(crate) fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
+    pub(crate) fn new(cb: CircuitBuilder<F, D>) -> Self {
+        Self { cb }
     }
 
     pub(crate) fn add(
-        &self,
-        cb: &mut CircuitBuilder<F, D>,
+        &mut self,
         x: AssignedValue<F, D, Q>,
         y: AssignedValue<F, D, Q>,
     ) -> Result<AssignedValue<F, D, Q>, Error> {
-        let quotient = AssignedValue::new(cb);
+        let quotient = AssignedValue::new(&mut self.cb);
         let op_kind = ArithmeticOpKind::Add(x, y);
         let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
-        cb.add_simple_generator(arithmetic_ops_generator);
+        self.cb.add_simple_generator(arithmetic_ops_generator);
 
         let ring_modulus = F::from_canonical_u64(Q);
         let one = F::ONE;
-        let neg_one = cb.neg_one();
-        let tmp = cb.add(x.value, y.value);
-        let result = cb.arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
-        Ok(AssignedValue::new_from_target(cb, result))
+        let neg_one = self.cb.neg_one();
+        let tmp = self.cb.add(x.value, y.value);
+        let result = self
+            .cb
+            .arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
+        Ok(AssignedValue::new_from_target(&mut self.cb, result))
     }
 
     pub(crate) fn sub(
-        &self,
-        cb: &mut CircuitBuilder<F, D>,
+        &mut self,
         x: AssignedValue<F, D, Q>,
         y: AssignedValue<F, D, Q>,
     ) -> Result<AssignedValue<F, D, Q>, Error> {
-        let quotient = AssignedValue::new(cb);
+        let quotient = AssignedValue::new(&mut self.cb);
         let op_kind = ArithmeticOpKind::Sub(x, y);
         let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
-        cb.add_simple_generator(arithmetic_ops_generator);
+        self.cb.add_simple_generator(arithmetic_ops_generator);
 
         let ring_modulus = F::from_canonical_u64(Q);
         let one = F::ONE;
-        let neg_one = cb.neg_one();
-        let mut tmp = cb.add_const(x.value, ring_modulus);
-        tmp = cb.sub(tmp, y.value);
-        let result = cb.arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
-        Ok(AssignedValue::new_from_target(cb, result))
+        let neg_one = self.cb.neg_one();
+        let mut tmp = self.cb.add_const(x.value, ring_modulus);
+        tmp = self.cb.sub(tmp, y.value);
+        let result = self
+            .cb
+            .arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
+        Ok(AssignedValue::new_from_target(&mut self.cb, result))
     }
 
     pub(crate) fn mul_with_constant(
-        &self,
-        cb: &mut CircuitBuilder<F, D>,
+        &mut self,
         multiplicand: AssignedValue<F, D, Q>,
         constant: F,
     ) -> Result<AssignedValue<F, D, Q>, Error> {
-        let quotient = AssignedValue::new(cb);
+        let quotient = AssignedValue::new(&mut self.cb);
         let op_kind = ArithmeticOpKind::MulConst(constant, multiplicand);
         let arithmetic_ops_generator = ArithmeticOpsGenerator::new(quotient, op_kind);
-        cb.add_simple_generator(arithmetic_ops_generator);
+        self.cb.add_simple_generator(arithmetic_ops_generator);
 
         let ring_modulus = F::from_canonical_u64(Q);
         let one = F::ONE;
-        let neg_one = cb.neg_one();
-        let tmp = cb.mul_const(constant, multiplicand.value);
-        let result = cb.arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
-        Ok(AssignedValue::new_from_target(cb, result))
+        let neg_one = self.cb.neg_one();
+        let tmp = self.cb.mul_const(constant, multiplicand.value);
+        let result = self
+            .cb
+            .arithmetic(ring_modulus, one, neg_one, quotient.value, tmp);
+        Ok(AssignedValue::new_from_target(&mut self.cb, result))
+    }
+
+    pub(crate) fn mul(
+        &mut self,
+        x: AssignedValue<F, D, Q>,
+        y: AssignedValue<F, D, Q>,
+    ) -> Result<AssignedValue<F, D, Q>, Error> {
+        // base-B decompose `x`
+        todo!()
     }
 }

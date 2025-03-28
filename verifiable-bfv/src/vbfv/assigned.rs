@@ -10,11 +10,14 @@ use plonky2::{
         witness::{PartialWitness, WitnessWrite},
     },
     plonk::circuit_builder::CircuitBuilder,
-    util::{log2_ceil, log2_strict},
+    util::{log2_ceil, log2_strict, log_floor},
 };
 
-use super::ntt_chip::NTTChip;
-use crate::{bfv::Ciphertext, vbfv::ntt_forward};
+use super::{arithmetic_chip::ArithmeticChip, ntt_chip::NTTChip};
+use crate::{
+    bfv::{Ciphertext, RelinearizationKey1},
+    vbfv::ntt_forward,
+};
 
 /// `AssignedValue` is assigned value of mod `Q` element
 #[derive(Copy, Clone, Debug)]
@@ -89,7 +92,12 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
 /// In bfv, we will assume that `Q-1` is divisible by `2N`, which means that `X^N+1` is fully
 /// splitting in `\mathbb{Z}_Q`.
 #[derive(Copy, Clone, Debug)]
-struct AssignedNTTPoly<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
+pub(crate) struct AssignedNTTPoly<
+    F: RichField + Extendable<D>,
+    const D: usize,
+    const N: usize,
+    const Q: u64,
+> {
     _marker: PhantomData<F>,
     evals: [AssignedValue<F, D, Q>; N],
 }
@@ -111,11 +119,15 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
         }
     }
 
-    fn new_from_values(values: [AssignedValue<F, D, Q>; N]) -> Self {
+    pub fn new_from_values(values: [AssignedValue<F, D, Q>; N]) -> Self {
         Self {
             _marker: PhantomData,
             evals: values,
         }
+    }
+
+    pub fn evals(&self) -> &[AssignedValue<F, D, Q>; N] {
+        &self.evals
     }
 
     /// Converts polynomial in coefficients form into NTT form and then assign
@@ -137,6 +149,34 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
             .collect::<Result<Vec<()>, Error>>()?;
         Ok(())
     }
+
+    pub fn add(
+        &self,
+        arithmetic_chip: &mut ArithmeticChip<F, D, Q>,
+        other: AssignedNTTPoly<F, D, N, Q>,
+    ) -> Result<AssignedNTTPoly<F, D, N, Q>, Error> {
+        let result = self
+            .evals()
+            .iter()
+            .zip_eq(other.evals().iter())
+            .map(|(eval0, eval1)| arithmetic_chip.add(*eval0, *eval1))
+            .collect::<Result<Vec<AssignedValue<F, D, Q>>, Error>>()?;
+        Ok(AssignedNTTPoly::new_from_values(result.try_into().unwrap()))
+    }
+
+    pub fn mul(
+        &self,
+        arithmetic_chip: &mut ArithmeticChip<F, D, Q>,
+        other: AssignedNTTPoly<F, D, N, Q>,
+    ) -> Result<AssignedNTTPoly<F, D, N, Q>, Error> {
+        let result = self
+            .evals()
+            .iter()
+            .zip_eq(other.evals().iter())
+            .map(|(eval0, eval1)| arithmetic_chip.mul(*eval0, *eval1))
+            .collect::<Result<Vec<AssignedValue<F, D, Q>>, Error>>()?;
+        Ok(AssignedNTTPoly::new_from_values(result.try_into().unwrap()))
+    }
 }
 
 /// `AssignedCiphertext` is assigned value of bfv ciphertext consisting of two `R_Q` polynomials.
@@ -147,26 +187,30 @@ pub struct AssignedCiphertext<
     const N: usize,
     const Q: u64,
 > {
+    plaintext_modulus: u64,
     ciphertext: [AssignedNTTPoly<F, D, N, Q>; 2],
 }
 
 impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     AssignedCiphertext<F, D, N, Q>
 {
-    pub fn new(cb: &mut CircuitBuilder<F, D>) -> Self {
+    pub fn new(cb: &mut CircuitBuilder<F, D>, plaintext_modulus: u64) -> Self {
         let ct_0 = AssignedNTTPoly::new(cb);
         let ct_1 = AssignedNTTPoly::new(cb);
         AssignedCiphertext {
+            plaintext_modulus,
             ciphertext: [ct_0, ct_1],
         }
     }
 
     pub fn new_from_targets(
         cb: &mut CircuitBuilder<F, D>,
+        plaintext_modulus: u64,
         ct_0_targets: [Target; N],
         ct_1_targets: [Target; N],
     ) -> Self {
         Self {
+            plaintext_modulus,
             ciphertext: [
                 AssignedNTTPoly::new_from_targets(cb, ct_0_targets),
                 AssignedNTTPoly::new_from_targets(cb, ct_1_targets),
@@ -175,15 +219,25 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     }
 
     pub fn new_from_values(
+        plaintext_modulus: u64,
         ct_0_values: [AssignedValue<F, D, Q>; N],
         ct_1_values: [AssignedValue<F, D, Q>; N],
     ) -> Self {
         Self {
+            plaintext_modulus,
             ciphertext: [
                 AssignedNTTPoly::new_from_values(ct_0_values),
                 AssignedNTTPoly::new_from_values(ct_1_values),
             ],
         }
+    }
+
+    pub fn plaintext_modulus(&self) -> u64 {
+        self.plaintext_modulus
+    }
+
+    pub fn ciphertext(&self) -> &[AssignedNTTPoly<F, D, N, Q>; 2] {
+        &self.ciphertext
     }
 
     pub fn register_as_public_input(&self, cb: &mut CircuitBuilder<F, D>) {
@@ -209,6 +263,49 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     pub fn assign(&self, pw: &mut PartialWitness<F>, ct: Ciphertext) -> Result<(), Error> {
         self.ciphertext[0].assign(pw, ct.c_0.val())?;
         self.ciphertext[1].assign(pw, ct.c_1.val())?;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct AssignedRelinearizationKey<
+    F: RichField + Extendable<D>,
+    const D: usize,
+    const N: usize,
+    const Q: u64,
+> {
+    /// ([base^i \cdot s^2 - (a_i \cdot s + e)]_q, a_i)
+    value: Vec<[AssignedNTTPoly<F, D, N, Q>; 2]>,
+    base: u64,
+}
+
+impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
+    AssignedRelinearizationKey<F, D, N, Q>
+{
+    pub fn new(cb: &mut CircuitBuilder<F, D>, base: u64) -> Self {
+        let num_limbs = log_floor(Q, base);
+        Self {
+            value: (0..num_limbs)
+                .map(|_| [AssignedNTTPoly::new(cb), AssignedNTTPoly::new(cb)])
+                .into_iter()
+                .collect_vec(),
+            base,
+        }
+    }
+
+    pub fn assign(
+        &self,
+        pw: &mut PartialWitness<F>,
+        rlk: &RelinearizationKey1,
+    ) -> Result<(), Error> {
+        self.value
+            .iter()
+            .zip_eq(rlk.val.iter())
+            .map(|(assigned_rlk, (rlk_0, rlk_1))| {
+                assigned_rlk[0].assign(pw, rlk_0.val())?;
+                assigned_rlk[1].assign(pw, rlk_1.val())
+            })
+            .collect::<Result<Vec<()>, Error>>()?;
         Ok(())
     }
 }

@@ -15,7 +15,23 @@ use plonky2::{
     util::serialization::{Buffer, IoResult, Read, Write},
 };
 
-use super::{arithmetic_chip::ArithmeticChip, assigned::AssignedCiphertext};
+use super::{
+    arithmetic_chip::ArithmeticChip,
+    assigned::{AssignedCiphertext, AssignedNTTPoly, AssignedRelinearizationKey},
+};
+
+mod relinearization;
+
+enum CiphertextOpKind<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64> {
+    Add(
+        AssignedCiphertext<F, D, N, Q>,
+        AssignedCiphertext<F, D, N, Q>,
+    ),
+    Mul(
+        AssignedCiphertext<F, D, N, Q>,
+        AssignedCiphertext<F, D, N, Q>,
+    ),
+}
 
 // TODO : AddConst, Mul, MulConst
 #[derive(Debug)]
@@ -34,7 +50,6 @@ impl<F: PrimeField64 + RichField + Extendable<D>, const D: usize, const N: usize
     CiphertextOpsGenerator<F, D, N, Q>
 {
     fn new(
-        cb: &mut CircuitBuilder<F, D>,
         ct0: AssignedCiphertext<F, D, N, Q>,
         ct1: AssignedCiphertext<F, D, N, Q>,
         quotient: Vec<AssignedValue<F, D, Q>>,
@@ -100,9 +115,9 @@ struct CiphertextChip<F: RichField + Extendable<D>, const D: usize, const N: usi
 impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     CiphertextChip<F, D, N, Q>
 {
-    pub fn new() -> Self {
+    pub fn new(cb: CircuitBuilder<F, D>) -> Self {
         Self {
-            arithmetic_chip: ArithmeticChip::new(),
+            arithmetic_chip: ArithmeticChip::new(cb),
         }
     }
 
@@ -116,32 +131,64 @@ impl<F: RichField + Extendable<D>, const D: usize, const N: usize, const Q: u64>
     }
 
     pub fn add_ciphertexts(
-        &self,
-        cb: &mut CircuitBuilder<F, D>,
+        &mut self,
         ct0: AssignedCiphertext<F, D, N, Q>,
         ct1: AssignedCiphertext<F, D, N, Q>,
     ) -> Result<AssignedCiphertext<F, D, N, Q>, Error> {
+        assert_eq!(ct0.plaintext_modulus(), ct1.plaintext_modulus());
         let mut ct_result_values = vec![];
         let quotient = (0..2 * N)
-            .map(|_| AssignedValue::new(cb))
+            .map(|_| AssignedValue::new(&mut self.arithmetic_chip.cb))
             .into_iter()
             .collect_vec();
         let ring_modulus = F::from_canonical_u64(Q);
         let one = F::ONE;
-        let neg_one = cb.neg_one();
-        let ciphertext_ops_generator = CiphertextOpsGenerator::new(cb, ct0, ct1, quotient.clone());
-        cb.add_simple_generator(ciphertext_ops_generator);
+        let neg_one = self.arithmetic_chip.cb.neg_one();
+        let ciphertext_ops_generator = CiphertextOpsGenerator::new(ct0, ct1, quotient.clone());
+        self.arithmetic_chip
+            .cb
+            .add_simple_generator(ciphertext_ops_generator);
         for (i, (ct0_value, ct1_value)) in ct0.values().iter().zip(ct1.values().iter()).enumerate()
         {
-            let ct_added = self.arithmetic_chip.add(cb, *ct0_value, *ct1_value)?;
+            let ct_added = self.arithmetic_chip.add(*ct0_value, *ct1_value)?;
             ct_result_values.push(ct_added);
         }
         let (ct_result_0_values, ct_result_1_values) = ct_result_values.split_at(N);
         let ct_result = AssignedCiphertext::new_from_values(
+            ct0.plaintext_modulus(),
             ct_result_0_values.try_into().unwrap(),
             ct_result_1_values.try_into().unwrap(),
         );
         Ok(ct_result)
+    }
+
+    pub fn mul_ciphertexts(
+        &mut self,
+        ct0: AssignedCiphertext<F, D, N, Q>,
+        ct1: AssignedCiphertext<F, D, N, Q>,
+    ) -> Result<[AssignedNTTPoly<F, D, N, Q>; 3], Error> {
+        assert_eq!(ct0.plaintext_modulus(), ct1.plaintext_modulus());
+        let mut ct_tensor_product = vec![];
+        ct_tensor_product
+            .push(ct0.ciphertext()[0].mul(&mut self.arithmetic_chip, ct1.ciphertext()[0])?);
+        let cross_product_0 =
+            ct0.ciphertext()[0].mul(&mut self.arithmetic_chip, ct1.ciphertext()[1])?;
+        let cross_product_1 =
+            ct0.ciphertext()[1].mul(&mut self.arithmetic_chip, ct1.ciphertext()[0])?;
+        ct_tensor_product.push(cross_product_0.add(&mut self.arithmetic_chip, cross_product_1)?);
+        ct_tensor_product
+            .push(ct0.ciphertext()[1].mul(&mut self.arithmetic_chip, ct1.ciphertext()[1])?);
+
+        Ok(ct_tensor_product.try_into().unwrap())
+    }
+
+    pub fn relinearize(
+        &mut self,
+        plaintext_modulus: u64,
+        degree_2_ct: [AssignedNTTPoly<F, D, N, Q>; 3],
+        relinearization_key: AssignedRelinearizationKey<F, D, N, Q>,
+    ) -> Result<AssignedCiphertext<F, D, N, Q>, Error> {
+        todo!()
     }
 }
 
@@ -202,12 +249,11 @@ mod tests {
             // constrain adding ciphertexts
             let config = CircuitConfig::standard_recursion_config();
             let mut builder = CircuitBuilder::<<C as GenericConfig<D>>::F, D>::new(config);
-            let ciphertext_chip = CiphertextChip::new();
+            let mut ciphertext_chip = CiphertextChip::new(builder);
 
-            let assigned_ct1 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder);
-            let assigned_ct2 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder);
-            let assigned_ct_added =
-                ciphertext_chip.add_ciphertexts(&mut builder, assigned_ct1, assigned_ct2)?;
+            let assigned_ct1 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder, t);
+            let assigned_ct2 = AssignedCiphertext::<F, D, N, Q>::new(&mut builder, t);
+            let assigned_ct_added = ciphertext_chip.add_ciphertexts(assigned_ct1, assigned_ct2)?;
 
             assigned_ct_added.register_as_public_input(&mut builder);
 
