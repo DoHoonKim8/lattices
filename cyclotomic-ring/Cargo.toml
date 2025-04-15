@@ -1,0 +1,34 @@
+[package]
+name = "cyclotomic-ring"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+ark-crypto-primitives = { version = "0.4", default-features = false, features = [
+    "sponge",
+] }
+ark-ff = "0.4"
+ark-poly = "0.4"
+ark-serialize = { version = "0.4", features = ["derive"] }
+ark-std = { version = "0.4", default-features = false }
+delegate = "0.13"
+derive_more = "0.99"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_with = { version = "3.7", default-features = false }
+zeroize = "1.7"
+num-bigint = { version = "0.4", default-features = false }
+num-integer = { version = "0.1", default-features = false }
+rand = { version = "0.8", default-features = false }
+num-traits = { version = "0.2", default-features = false }
+rayon = { version = "1.10", optional = true }
+
+# stark-rings-linalg
+stark-rings-linalg = { git = "https://github.com/NethermindEth/stark-rings/" }
+
+[features]
+parallel = [ "rayon" ]
+
+[dev-dependencies]
+rand_chacha = { version = "0.3.1", default-features = false }

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "cyclotomic-ring",
     "falcon",
     "labrador-rs",
     "verifiable-bfv",
